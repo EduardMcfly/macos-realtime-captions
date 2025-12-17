@@ -32,6 +32,7 @@ def log_to_file(text):
 
 class CaptionWindow:
     def __init__(self, model_size, device_index, device_name, language):
+        print("🔧 Initializing CaptionWindow UI...")
         self.root = tk.Tk()
         self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
         self.root.attributes("-topmost", True)
@@ -43,6 +44,18 @@ class CaptionWindow:
         self.paragraph_threshold = 2.0 # Seconds of silence to trigger new paragraph
         
         self.language = language if language != "auto" else None
+
+        # Config Button (Gear Icon) - Using text "⚙️"
+        config_btn = tk.Button(
+            self.root, 
+            text="⚙️", 
+            font=("Arial", 14),
+            bg="black", 
+            fg="white", 
+            bd=0, 
+            command=self.open_settings
+        )
+        config_btn.place(relx=1.0, x=-10, y=10, anchor="ne")
 
         # Text Area
         self.text_area = tk.Text(
@@ -63,14 +76,31 @@ class CaptionWindow:
         self.device_index = device_index
         
         # Start processing in background
+        print("🧵 Starting processing thread...")
         threading.Thread(target=self.start_processing, daemon=True).start()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        print("🖥️ Entering Main Loop...")
         self.root.mainloop()
+
+    def open_settings(self):
+        # Open a new ConfigWindow instance
+        # Ideally, we should restart the app or apply settings dynamically.
+        # For simplicity, we'll close current window and re-open config.
+        if messagebox.askyesno("Settings", "Change settings? This will restart the captions."):
+            stop_event.set()
+            try:
+                self.root.destroy()
+            except:
+                pass
+            ConfigWindow()
 
     def on_close(self):
         stop_event.set()
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except:
+            pass
         # Force exit to kill threads
         import os
         os._exit(0)
@@ -158,8 +188,12 @@ class CaptionWindow:
                     sd.sleep(50) # Small sleep to reduce CPU
 
         except Exception as e:
-            self.root.after(0, messagebox.showerror, "Error", str(e))
-            self.root.after(0, self.root.destroy)
+            # Check if root still exists before showing error or destroying
+            try:
+                self.root.after(0, messagebox.showerror, "Error", str(e))
+                self.root.after(0, self.root.destroy)
+            except:
+                pass
 
 
 class ConfigWindow:
@@ -257,9 +291,50 @@ class ConfigWindow:
         # Save configuration for next time
         self.save_config(selected_device_name, selected_model, selected_lang)
 
-        self.root.destroy()
+        # Destroy config window
+        try:
+             self.root.destroy()
+        except:
+             pass
+             
         # Launch main window
         CaptionWindow(selected_model, device_index, selected_device_name, selected_lang)
 
 if __name__ == "__main__":
-    ConfigWindow()
+    # Check if config exists to auto-start
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                config = json.load(f)
+            
+            # If we have a valid config, try to start directly
+            if config.get("device_name") and config.get("model_size"):
+                # We need to find the device index first
+                try:
+                    devices = sd.query_devices()
+                    device_index = None
+                    for i, device in enumerate(devices):
+                        if device['name'] == config["device_name"]:
+                            device_index = i
+                            break
+                    
+                    if device_index is not None:
+                        # Direct Start
+                        print(f"🚀 Auto-starting with saved config: {config}")
+                        CaptionWindow(config["model_size"], device_index, config["device_name"], config.get("language", "es"))
+                        # Ensure mainloop is called if CaptionWindow doesn't handle it fully or returns
+                        # (CaptionWindow calls mainloop() at end of init, so it should block here)
+                    else:
+                        # Device not found, show config
+                        print("⚠️ Saved device not found. Opening settings...")
+                        ConfigWindow()
+                except Exception as e:
+                    print(f"❌ Error during auto-start: {e}")
+                    ConfigWindow()
+            else:
+                ConfigWindow()
+        except Exception as e:
+             print(f"❌ Config error: {e}")
+             ConfigWindow()
+    else:
+        ConfigWindow()

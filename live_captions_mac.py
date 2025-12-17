@@ -141,11 +141,8 @@ class CaptionWindow:
                         # MLX Whisper Transcribe
                         try:
                             # Use step-by-step decoding if available or smaller chunks
-                            import sys
                             import os
-                            
-                            # Suppress TQDM loading bars from mlx/huggingface
-                            os.environ["TQDM_DISABLE"] = "1"
+                            os.environ["TQDM_DISABLE"] = "1" # Suppress progress bars
                             
                             result = mlx_whisper.transcribe(
                                 chunk.flatten(),

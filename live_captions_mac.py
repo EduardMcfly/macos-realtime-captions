@@ -28,13 +28,15 @@ def log_to_file(text):
         f.write(f"[{timestamp}] {text}\n")
 
 class CaptionWindow:
-    def __init__(self, model_size, device_index, device_name):
+    def __init__(self, model_size, device_index, device_name, language):
         self.root = tk.Tk()
-        self.root.title(f"Live Captions - {device_name} ({model_size})")
+        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.88)
         self.root.configure(bg="black")
         self.root.geometry("800x200+200+650")
+        
+        self.language = language if language != "auto" else None
 
         # Text Area
         self.text_area = tk.Text(
@@ -116,7 +118,7 @@ class CaptionWindow:
 
                         segments, _ = model.transcribe(
                             chunk.flatten(),
-                            language="es",
+                            language=self.language,
                             vad_filter=True,
                             beam_size=1
                         )
@@ -162,6 +164,13 @@ class ConfigWindow:
         
         ttk.Label(self.root, text="(tiny = fastest/less accurate, medium = slower/more accurate)", font=("Arial", 10), foreground="gray").pack()
 
+        # Language Selection
+        ttk.Label(self.root, text="Select Language:").pack(pady=10)
+        self.lang_combo = ttk.Combobox(self.root, width=40)
+        self.lang_combo['values'] = ["es", "en", "fr", "de", "it", "pt", "auto"]
+        self.lang_combo.pack(pady=5)
+        self.lang_combo.set("es") # Default
+
         # Start Button
         ttk.Button(self.root, text="Start Captions", command=self.start_app).pack(pady=30)
         
@@ -177,6 +186,7 @@ class ConfigWindow:
     def start_app(self):
         selected_device_name = self.device_combo.get()
         selected_model = self.model_combo.get()
+        selected_lang = self.lang_combo.get()
         
         if not selected_device_name:
             messagebox.showwarning("Warning", "Please select an audio device.")
@@ -195,7 +205,7 @@ class ConfigWindow:
 
         self.root.destroy()
         # Launch main window
-        CaptionWindow(selected_model, device_index, selected_device_name)
+        CaptionWindow(selected_model, device_index, selected_device_name, selected_lang)
 
 if __name__ == "__main__":
     ConfigWindow()

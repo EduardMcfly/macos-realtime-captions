@@ -11,15 +11,14 @@ import mlx_whisper
 
 # ---------------- CONFIG ----------------
 SAMPLE_RATE = 16000
-BLOCK_SECONDS = 1 # Increased context window for better sentence coherence
+BLOCK_SECONDS = 2.0 # Balanced for speed and fluidity
 LOG_FILE = "transcriptions.txt"
 CONFIG_FILE = "config.json"
 # ----------------------------------------
 
 audio_queue = queue.Queue()
-audio_buffer = np.zeros((0, 1), dtype=np.float32)
+# Note: audio_buffer is now local to the processing thread to avoid global state issues
 stop_event = threading.Event()
-model = None
 
 def audio_callback(indata, frames, time, status):
     if not stop_event.is_set():
@@ -33,7 +32,11 @@ def log_to_file(text):
 class CaptionWindow:
     def __init__(self, model_size, device_index, device_name, language):
         print("🔧 Initializing CaptionWindow UI...")
-        self.root = tk.Tk()
+        try:
+            self.root = tk.Tk()
+        except Exception as e:
+            print(f"DEBUG: Failed to create tk.Tk(): {e}")
+            raise e
         self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.88)
@@ -41,52 +44,35 @@ class CaptionWindow:
         self.root.geometry("800x200+200+650")
         
         self.last_text_time = datetime.datetime.now()
-        self.paragraph_threshold = 2.0 # Seconds of silence to trigger new paragraph
-        
+        self.paragraph_threshold = 2.0 
         self.language = language if language != "auto" else None
 
-        # Config Button (Gear Icon) - Using text "⚙️"
-        config_btn = tk.Button(
-            self.root, 
-            text="⚙️", 
-            font=("Arial", 14),
-            bg="black", 
-            fg="white", 
-            bd=0, 
-            command=self.open_settings
-        )
+        # UI Components
+        config_btn = tk.Button(self.root, text="⚙️", font=("Arial", 14), bg="black", fg="white", bd=0, command=self.open_settings)
         config_btn.place(relx=1.0, x=-10, y=10, anchor="ne")
 
-        # Text Area
-        self.text_area = tk.Text(
-            self.root,
-            font=("Helvetica", 20),
-            fg="white",
-            bg="black",
-            wrap="word",
-            height=5,
-            bd=0,
-            highlightthickness=0
-        )
+        self.text_area = tk.Text(self.root, font=("Helvetica", 20), fg="white", bg="black", wrap="word", height=5, bd=0, highlightthickness=0)
         self.text_area.pack(fill="both", expand=True, padx=15, pady=15)
         self.text_area.insert("1.0", "⏳ Loading Model... Please wait.\n")
+        self.text_area.mark_set("stable_end", "insert")
+        self.text_area.mark_gravity("stable_end", tk.LEFT)
+        self.text_area.tag_config("unstable", foreground="#888888")
         self.text_area.config(state="disabled")
 
         self.model_size = model_size
         self.device_index = device_index
         
-        # Start processing in background
-        print("🧵 Starting processing thread...")
-        threading.Thread(target=self.start_processing, daemon=True).start()
+        # Start processing in thread but keep reference
+        self.processing_thread = threading.Thread(target=self.start_processing, daemon=True)
+        self.processing_thread.start()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # Start mainloop explicitly
         print("🖥️ Entering Main Loop...")
         self.root.mainloop()
 
     def open_settings(self):
-        # Open a new ConfigWindow instance
-        # Ideally, we should restart the app or apply settings dynamically.
-        # For simplicity, we'll close current window and re-open config.
         if messagebox.askyesno("Settings", "Change settings? This will restart the captions."):
             stop_event.set()
             try:
@@ -101,49 +87,68 @@ class CaptionWindow:
             self.root.destroy()
         except:
             pass
-        # Force exit to kill threads
+        # We need to exit the process completely to stop threads
         import os
         os._exit(0)
 
-    def update_text(self, text):
+    def update_text(self, text, is_final=False): 
         try:
-            # Check if widget exists before configuring
-            if not self.text_area.winfo_exists():
-                return
-                
-            current_time = datetime.datetime.now()
-            time_diff = (current_time - self.last_text_time).total_seconds()
+            if not self.text_area.winfo_exists(): return
             
             self.text_area.config(state="normal")
             
-            # Check if enough time has passed to start a new paragraph
-            if time_diff > self.paragraph_threshold:
-                self.text_area.insert(tk.END, "\n\n" + text)
-            else:
-                # If text doesn't start with space, add one for continuity
-                prefix = " " if not text.startswith(" ") else ""
-                self.text_area.insert(tk.END, prefix + text)
-                
-            self.last_text_time = current_time
+            # Delete any existing unstable text
+            self.text_area.delete("stable_end", tk.END)
             
+            if text:
+                prefix = ""
+                current_time = datetime.datetime.now()
+                time_diff = (current_time - self.last_text_time).total_seconds()
+                
+                if time_diff > self.paragraph_threshold:
+                    prefix = "\n\n"
+                else:
+                    # Check if we need a space
+                    prev_char = self.text_area.get("stable_end - 1 chars", "stable_end")
+                    if prev_char and prev_char not in [" ", "\n"] and not text.startswith(" "):
+                        prefix = " "
+
+                full_text = prefix + text
+                
+                if is_final:
+                    self.text_area.insert("stable_end", full_text)
+                    self.text_area.mark_set("stable_end", tk.END) 
+                    self.last_text_time = current_time
+                else:
+                    self.text_area.insert("stable_end", full_text, "unstable")
+                
             self.text_area.see(tk.END)
             self.text_area.config(state="disabled")
-        except:
-            pass # Ignore UI errors if window is closing
+        except: pass
 
     def set_status(self, text):
-        self.text_area.config(state="normal")
-        self.text_area.delete("1.0", tk.END)
-        self.text_area.insert("1.0", text + "\n")
-        self.text_area.config(state="disabled")
+        try:
+            if not self.text_area.winfo_exists(): return
+            self.text_area.config(state="normal")
+            self.text_area.delete("1.0", tk.END)
+            self.text_area.insert("1.0", text + "\n")
+            self.text_area.config(state="disabled")
+        except: pass
 
     def start_processing(self):
-        global audio_buffer
-        
+        # Buffer initialization local to thread
+        local_audio_buffer = np.zeros((0, 1), dtype=np.float32)
+        last_fast_transcribe_time = 0
+        import time
+
         try:
             self.root.after(0, self.set_status, "...")
             print(f"✅ Starting MLX Whisper ({self.model_size})...")
 
+            # Initialize Whisper Model ONCE here to avoid reloading in loop
+            import os
+            os.environ["TQDM_DISABLE"] = "1"
+            
             # 2. Start Audio Stream
             with sd.InputStream(
                 device=self.device_index,
@@ -153,54 +158,64 @@ class CaptionWindow:
                 callback=audio_callback
             ):
                 while not stop_event.is_set():
-                    # Process audio queue
+                    # Process audio queue safely
                     while not audio_queue.empty():
-                        audio_buffer = np.concatenate([audio_buffer, audio_queue.get()])
+                        data = audio_queue.get()
+                        local_audio_buffer = np.concatenate([local_audio_buffer, data])
 
-                    if len(audio_buffer) >= int(SAMPLE_RATE * BLOCK_SECONDS):
-                        chunk = audio_buffer[:int(SAMPLE_RATE * BLOCK_SECONDS)]
-                        audio_buffer = audio_buffer[int(SAMPLE_RATE * BLOCK_SECONDS):]
+                    # Current accumulated duration
+                    current_duration = len(local_audio_buffer) / SAMPLE_RATE
+                    now = time.time()
 
-                        # MLX Whisper Transcribe
+                    # --- SLOW PATH (Commit every ~BLOCK_SECONDS) ---
+                    if current_duration >= BLOCK_SECONDS:
+                        chunk_samples = int(SAMPLE_RATE * BLOCK_SECONDS)
+                        chunk = local_audio_buffer[:chunk_samples]
+                        local_audio_buffer = local_audio_buffer[chunk_samples:]
+
                         try:
-                            # Use step-by-step decoding if available or smaller chunks
-                            import os
-                            os.environ["TQDM_DISABLE"] = "1" # Suppress progress bars
-                            
                             result = mlx_whisper.transcribe(
                                 chunk.flatten(),
                                 path_or_hf_repo=f"mlx-community/whisper-{self.model_size}-mlx",
                                 language=self.language,
                                 verbose=False,
-                                # Reduced speed optimizations to improve accuracy and context
                                 temperature=0.0,
-                                # compression_ratio_threshold=None,
-                                # logprob_threshold=None,
-                                # no_speech_threshold=None,
-                                condition_on_previous_text=True # Re-enabled context for better sentence flow
+                                condition_on_previous_text=True
                             )
                             text = result["text"].strip()
                             
-                            # Remove trailing punctuation (dots) if it's likely a sentence fragment
                             if text.endswith(".") and len(text.split()) < 4:
                                 text = text[:-1]
 
                             if text:
                                 print(f"📝 {text}")
                                 log_to_file(text)
-                                self.root.after(0, self.update_text, text)
+                                self.root.after(0, self.update_text, text, True)
                         except Exception as e:
                             print(f"\n⚠️ Transcription error: {e}")
                     
-                    sd.sleep(50) # Small sleep to reduce CPU
+                    # --- FAST PATH (Preview every ~0.3s) ---
+                    elif current_duration > 0.5 and (now - last_fast_transcribe_time > 0.3):
+                        try:
+                            result = mlx_whisper.transcribe(
+                                local_audio_buffer.flatten(),
+                                path_or_hf_repo=f"mlx-community/whisper-{self.model_size}-mlx",
+                                language=self.language,
+                                verbose=False,
+                                temperature=0.0,
+                                condition_on_previous_text=True
+                            )
+                            text = result["text"].strip()
+                            if text:
+                                self.root.after(0, self.update_text, text, False)
+                            last_fast_transcribe_time = now
+                        except: pass
+                    
+                    sd.sleep(50)
 
         except Exception as e:
-            # Check if root still exists before showing error or destroying
-            try:
-                self.root.after(0, messagebox.showerror, "Error", str(e))
-                self.root.after(0, self.root.destroy)
-            except:
-                pass
+            print(f"Critical Error: {e}")
+            pass
 
 
 class ConfigWindow:
@@ -226,8 +241,12 @@ class ConfigWindow:
         if saved_device and saved_device in device_names:
              self.device_combo.set(saved_device)
         else:
+             # Default search for blackhole
              blackhole_idx = next((i for i, name in enumerate(device_names) if "BlackHole" in name), 0)
-             self.device_combo.current(blackhole_idx)
+             if blackhole_idx < len(device_names):
+                self.device_combo.current(blackhole_idx)
+             elif device_names:
+                self.device_combo.current(0)
 
         # Model Selection
         ttk.Label(self.root, text="Select Whisper Model Size:").pack(pady=10)
@@ -329,8 +348,6 @@ if __name__ == "__main__":
                         # Direct Start
                         print(f"🚀 Auto-starting with saved config: {config}")
                         CaptionWindow(config["model_size"], device_index, config["device_name"], config.get("language", "es"))
-                        # Ensure mainloop is called if CaptionWindow doesn't handle it fully or returns
-                        # (CaptionWindow calls mainloop() at end of init, so it should block here)
                     else:
                         # Device not found, show config
                         print("⚠️ Saved device not found. Opening settings...")

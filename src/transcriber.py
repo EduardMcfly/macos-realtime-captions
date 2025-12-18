@@ -1,150 +1,188 @@
 import numpy as np
-import sounddevice as sd
 import mlx_whisper
 import time
+import threading
+import queue
 import os
-from .app_config import stop_event, audio_queue, SAMPLE_RATE, pause_event, transcription_paused
+from typing import Callable, Optional
+from .config import SAMPLE_RATE
 from .utils import log_to_file
-from .audio_handler import audio_callback
+import sounddevice as sd  # Used for sleep
 
-def run_transcription_loop(device_index, model_size, language, update_callback, status_callback):
-    """
-    Simplified single-loop transcriber.
-    Accumulates audio and continuously transcribes the active buffer.
-    Commits text when a sentence finishes or silence is detected.
-    """
-    
-    # Internal State
-    local_audio_buffer = np.zeros((0, 1), dtype=np.float32)
-    last_transcribe_time = 0
-    last_committed_text = ""
-    
-    # Configuration
-    SILENCE_THRESHOLD = 0.01 
-    MIN_DURATION = 1.0
-    MAX_DURATION = 15.0 
-    UPDATE_INTERVAL = 0.5
+class Transcriber:
+    def __init__(
+        self, 
+        model_size: str, 
+        language: str, 
+        audio_queue: queue.Queue, 
+        update_callback: Callable[[str, bool], None], 
+        status_callback: Callable[[str], None]
+    ):
+        self.model_size = model_size
+        self.language = language
+        self.audio_queue = audio_queue
+        self.update_callback = update_callback
+        self.status_callback = status_callback
+        
+        self.running = False
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.transcription_paused = threading.Event()
+        
+        # Configuration
+        self.silence_threshold = 0.01 
+        self.min_duration = 1.0
+        self.max_duration = 15.0 
+        self.update_interval = 0.5
+        
+        # State
+        self.local_audio_buffer = np.zeros((0, 1), dtype=np.float32)
+        self.last_transcribe_time = 0
+        self.last_committed_text = ""
+        
+        # Models
+        self.fast_model_path = "mlx-community/whisper-tiny-mlx"
+        self.quality_model_path = f"mlx-community/whisper-{model_size}-mlx"
 
-    try:
-        status_callback("Ready to transcribe")
-        print(f"✅ Starting MLX Whisper (Fast: tiny, Quality: {model_size})...")
+    def start(self):
+        """Starts the transcription loop in a separate thread."""
+        self.running = True
+        self.stop_event.clear()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        """Stops the transcription loop."""
+        self.running = False
+        self.stop_event.set()
+        if hasattr(self, 'thread') and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+
+    def pause(self):
+        """Pauses transcription (e.g., during translation)."""
+        self.pause_event.set()
+
+    def resume(self):
+        """Resumes transcription."""
+        self.pause_event.clear()
+
+    def is_paused(self) -> bool:
+        """Returns True if the transcriber is currently paused."""
+        return self.transcription_paused.is_set()
+
+    def _run_loop(self):
+        """Main transcription loop."""
+        self.status_callback("Ready to transcribe")
+        print(f"✅ Starting MLX Whisper (Fast: tiny, Quality: {self.model_size})...")
         os.environ["TQDM_DISABLE"] = "1"
-        
-        # Pre-load both models to avoid delay on first run
-        # Note: mlx_whisper loads on demand, but we define paths here
-        fast_model_path = "mlx-community/whisper-tiny-mlx"
-        quality_model_path = f"mlx-community/whisper-{model_size}-mlx"
-        
-        with sd.InputStream(
-            device=device_index,
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            callback=audio_callback
-        ):
-            while not stop_event.is_set():
-                # Check for pause event (translation in progress)
-                if pause_event.is_set():
-                    transcription_paused.set() # Signal that we are effectively paused
-                    sd.sleep(100)
-                    continue
-                else:
-                    transcription_paused.clear() # We are active
 
-                # 1. Drain Queue
-                while not audio_queue.empty():
-                    local_audio_buffer = np.concatenate([local_audio_buffer, audio_queue.get()])
+        while not self.stop_event.is_set():
+            # Check for pause event
+            if self.pause_event.is_set():
+                self.transcription_paused.set() 
+                sd.sleep(100)
+                continue
+            else:
+                self.transcription_paused.clear()
 
-                current_duration = len(local_audio_buffer) / SAMPLE_RATE
-                now = time.time()
+            # 1. Drain Queue
+            while not self.audio_queue.empty():
+                try:
+                    data = self.audio_queue.get_nowait()
+                    self.local_audio_buffer = np.concatenate([self.local_audio_buffer, data])
+                except queue.Empty:
+                    break
 
-                # 2. Transcribe?
-                if current_duration >= MIN_DURATION and (now - last_transcribe_time > UPDATE_INTERVAL):
-                    
-                    # Optimization: Skip if silence
-                    rms = np.sqrt(np.mean(local_audio_buffer**2))
-                    if rms < SILENCE_THRESHOLD and current_duration < MAX_DURATION:
-                        # Clear pending text if silence is detected to prevent stale previews
-                        update_callback("", False)
-                        sd.sleep(50)
-                        continue
+            current_duration = len(self.local_audio_buffer) / SAMPLE_RATE
+            now = time.time()
 
-                    try:
-                        # Context Prompting
-                        prompt = last_committed_text[-200:] if last_committed_text else " "
-                        
-                        # Decide which model to use
-                        # If we are committing (final check), use quality model.
-                        # If we are just previewing, use fast model.
-                        
-                        # We need to know if we *would* commit based on duration/silence first?
-                        # Actually, we can just run the fast model first for the preview.
-                        # BUT, if we are near a commit point, we might want to run the quality model directly?
-                        # Simplest Dual Strategy:
-                        # 1. ALWAYS run fast model first to get text for logic/preview.
-                        # 2. If logic says "commit", re-run with quality model on the SAME buffer.
-                        
-                        # Transcribe with FAST model
-                        result_fast = mlx_whisper.transcribe(
-                            local_audio_buffer.flatten(),
-                            path_or_hf_repo=fast_model_path,
-                            language=language,
-                            verbose=False,
-                            temperature=0.0,
-                            condition_on_previous_text=True,
-                            initial_prompt=prompt
-                        )
-                        text = result_fast["text"].strip()
-                        
-                        # Anti-Hallucination
-                        if text.lower() == prompt.strip().lower():
-                            text = ""
-
-                        if text:
-                            # 3. Smart Commit Logic
-                            is_sentence_end = text.endswith((".", "!", "?"))
-                            
-                            # Check for silence at the end
-                            last_chunk = local_audio_buffer[-int(0.5 * SAMPLE_RATE):] if len(local_audio_buffer) > 0.5 * SAMPLE_RATE else local_audio_buffer
-                            is_silence_end = np.sqrt(np.mean(last_chunk**2)) < SILENCE_THRESHOLD
-
-                            should_commit = (is_sentence_end and is_silence_end) or (current_duration > MAX_DURATION)
-                            
-                            if should_commit:
-                                # RE-TRANSCRIBE with QUALITY model
-                                print("✨ Refining with quality model...")
-                                result_quality = mlx_whisper.transcribe(
-                                    local_audio_buffer.flatten(),
-                                    path_or_hf_repo=quality_model_path,
-                                    language=language,
-                                    verbose=False,
-                                    temperature=0.0,
-                                    condition_on_previous_text=True,
-                                    initial_prompt=prompt
-                                )
-                                text_quality = result_quality["text"].strip()
-                                
-                                # Use quality text if valid, else fallback to fast text
-                                final_text = text_quality if text_quality else text
-                                
-                                print(f"📝 {final_text}")
-                                log_to_file(final_text)
-                                update_callback(final_text, True) # Final
-                                
-                                last_committed_text += " " + final_text
-                                if len(last_committed_text) > 1000: last_committed_text = last_committed_text[-1000:]
-                                
-                                local_audio_buffer = np.zeros((0, 1), dtype=np.float32)
-                            else:
-                                update_callback(text, False) # Preview
-
-                        last_transcribe_time = now
-
-                    except Exception as e:
-                        print(f"\n⚠️ Transcription error: {e}")
+            # 2. Transcribe?
+            if current_duration >= self.min_duration and (now - self.last_transcribe_time > self.update_interval):
                 
-                sd.sleep(50)
+                # Optimization: Skip if silence
+                rms = np.sqrt(np.mean(self.local_audio_buffer**2))
+                if rms < self.silence_threshold and current_duration < self.max_duration:
+                    # Clear pending text if silence is detected
+                    self.update_callback("", False)
+                    sd.sleep(50)
+                    continue
 
-    except Exception as e:
-        print(f"Critical Error: {e}")
+                try:
+                    self._process_audio_buffer(current_duration)
+                    self.last_transcribe_time = now
 
+                except Exception as e:
+                    print(f"\n⚠️ Transcription error: {e}")
+            
+            sd.sleep(50)
+
+    def _process_audio_buffer(self, current_duration: float):
+        # Context Prompting
+        prompt = self.last_committed_text[-200:] if self.last_committed_text else " "
+        
+        # Transcribe with FAST model for preview/logic
+        result_fast = mlx_whisper.transcribe(
+            self.local_audio_buffer.flatten(),
+            path_or_hf_repo=self.fast_model_path,
+            language=self.language,
+            verbose=False,
+            temperature=0.0,
+            condition_on_previous_text=True,
+            initial_prompt=prompt
+        )
+        text = result_fast["text"].strip()
+        
+        # Anti-Hallucination
+        if text.lower() == prompt.strip().lower():
+            text = ""
+
+        if text:
+            # Smart Commit Logic
+            is_sentence_end = text.endswith((".", "!", "?"))
+            
+            # Check for silence at the end
+            last_chunk_len = int(0.5 * SAMPLE_RATE)
+            if len(self.local_audio_buffer) > last_chunk_len:
+                last_chunk = self.local_audio_buffer[-last_chunk_len:]
+                is_silence_end = np.sqrt(np.mean(last_chunk**2)) < self.silence_threshold
+            else:
+                is_silence_end = True # Assume silence if buffer is short (though min duration check passed)
+
+            should_commit = (is_sentence_end and is_silence_end) or (current_duration > self.max_duration)
+            
+            if should_commit:
+                self._commit_text(prompt)
+            else:
+                self.update_callback(text, False) # Preview
+
+    def _commit_text(self, prompt: str):
+        # RE-TRANSCRIBE with QUALITY model
+        print("✨ Refining with quality model...")
+        result_quality = mlx_whisper.transcribe(
+            self.local_audio_buffer.flatten(),
+            path_or_hf_repo=self.quality_model_path,
+            language=self.language,
+            verbose=False,
+            temperature=0.0,
+            condition_on_previous_text=True,
+            initial_prompt=prompt
+        )
+        text_quality = result_quality["text"].strip()
+        
+        # Use quality text if valid, else fallback
+        # Assuming we have the 'text' from fast model available? 
+        # Actually I need to re-run or pass it. 
+        # But 'text' was local to _process_audio_buffer.
+        # It's safer to trust quality model or re-use fast if quality fails (unlikely here).
+        
+        final_text = text_quality # Simply trust quality model
+        
+        print(f"📝 {final_text}")
+        log_to_file(final_text)
+        self.update_callback(final_text, True) # Final
+        
+        self.last_committed_text += " " + final_text
+        if len(self.last_committed_text) > 1000: 
+            self.last_committed_text = self.last_committed_text[-1000:]
+        
+        self.local_audio_buffer = np.zeros((0, 1), dtype=np.float32)

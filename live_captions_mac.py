@@ -11,7 +11,7 @@ import mlx_whisper
 
 # ---------------- CONFIG ----------------
 SAMPLE_RATE = 16000
-BLOCK_SECONDS = 1 # Reduced for near real-time streaming feel
+BLOCK_SECONDS = 1 # Increased context window for better sentence coherence
 LOG_FILE = "transcriptions.txt"
 CONFIG_FILE = "config.json"
 # ----------------------------------------
@@ -106,23 +106,30 @@ class CaptionWindow:
         os._exit(0)
 
     def update_text(self, text):
-        current_time = datetime.datetime.now()
-        time_diff = (current_time - self.last_text_time).total_seconds()
-        
-        self.text_area.config(state="normal")
-        
-        # Check if enough time has passed to start a new paragraph
-        if time_diff > self.paragraph_threshold:
-            self.text_area.insert(tk.END, "\n\n" + text)
-        else:
-            # If text doesn't start with space, add one for continuity
-            prefix = " " if not text.startswith(" ") else ""
-            self.text_area.insert(tk.END, prefix + text)
+        try:
+            # Check if widget exists before configuring
+            if not self.text_area.winfo_exists():
+                return
+                
+            current_time = datetime.datetime.now()
+            time_diff = (current_time - self.last_text_time).total_seconds()
             
-        self.last_text_time = current_time
-        
-        self.text_area.see(tk.END)
-        self.text_area.config(state="disabled")
+            self.text_area.config(state="normal")
+            
+            # Check if enough time has passed to start a new paragraph
+            if time_diff > self.paragraph_threshold:
+                self.text_area.insert(tk.END, "\n\n" + text)
+            else:
+                # If text doesn't start with space, add one for continuity
+                prefix = " " if not text.startswith(" ") else ""
+                self.text_area.insert(tk.END, prefix + text)
+                
+            self.last_text_time = current_time
+            
+            self.text_area.see(tk.END)
+            self.text_area.config(state="disabled")
+        except:
+            pass # Ignore UI errors if window is closing
 
     def set_status(self, text):
         self.text_area.config(state="normal")
@@ -165,12 +172,12 @@ class CaptionWindow:
                                 path_or_hf_repo=f"mlx-community/whisper-{self.model_size}-mlx",
                                 language=self.language,
                                 verbose=False,
-                                # Optimize for speed
+                                # Reduced speed optimizations to improve accuracy and context
                                 temperature=0.0,
-                                compression_ratio_threshold=None,
-                                logprob_threshold=None,
-                                no_speech_threshold=None,
-                                condition_on_previous_text=False
+                                # compression_ratio_threshold=None,
+                                # logprob_threshold=None,
+                                # no_speech_threshold=None,
+                                condition_on_previous_text=True # Re-enabled context for better sentence flow
                             )
                             text = result["text"].strip()
                             

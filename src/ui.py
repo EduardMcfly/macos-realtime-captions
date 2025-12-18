@@ -21,7 +21,20 @@ class CaptionWindow:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.88)
         self.root.configure(bg="black")
-        self.root.geometry("800x200+200+650")
+        
+        # Window Dimensions
+        window_width = 800
+        window_height = 200
+        padding_bottom = 50
+
+        # Calculate Position (Bottom Center of Primary Screen)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        x_pos = (screen_width - window_width) // 2
+        y_pos = screen_height - window_height - padding_bottom
+        
+        self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
         
         self.last_text_time = datetime.datetime.now()
         self.paragraph_threshold = 2.0 
@@ -204,7 +217,7 @@ class ConfigWindow:
         self.model_combo = ttk.Combobox(self.root, width=40)
         self.model_combo['values'] = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_combo.pack(pady=5)
-        self.model_combo.set(self.config.get("model_size", "medium"))
+        self.model_combo.set(self.config.get("model_size", "small"))
         
         ttk.Label(self.root, text="(Fast 'tiny' model always used for previews)", font=("Arial", 10), foreground="gray").pack()
 

@@ -24,7 +24,7 @@ class ConfigManager:
         model_size: str, 
         language: str, 
         translation_lang: str = "en", 
-        translation_model: str = "mlx-community/Llama-3.2-1B-Instruct-4bit"
+        translation_model: str = "mlx-community/gemma-2-2b-it-4bit"
     ) -> None:
         config = {
             "device_name": device_name,

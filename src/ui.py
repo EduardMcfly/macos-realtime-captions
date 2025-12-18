@@ -192,6 +192,7 @@ class CaptionWindow:
                 self.preload_translation_model()
 
             from mlx_lm import generate
+            from mlx_lm.sample_utils import make_sampler
             
             lang_map = {
                 "en": "English", "es": "Spanish", "fr": "French", 
@@ -199,19 +200,24 @@ class CaptionWindow:
             }
             target_lang_name = lang_map.get(self.translation_lang, self.translation_lang)
             
+            # More robust prompt to ensure full translation
             messages = [
-                {"role": "system", "content": f"You are a professional translator. Translate the following text strictly into {target_lang_name}. Do not add explanations, just the translation."},
+                {"role": "system", "content": f"You are a professional interpreter. Translate the exact text provided below into {target_lang_name}. Translate every single sentence found in the input. Do not summarize, do not omit any details. Do not add explanations, just output the translation."},
                 {"role": "user", "content": segment_text}
             ]
             
             prompt = self.translation_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             
+            # Use a slight temperature to improve fluency, but keep it low for accuracy
+            sampler = make_sampler(temp=0.1)
+
             translation = generate(
                 self.translation_model, 
                 self.translation_tokenizer, 
                 prompt=prompt, 
                 max_tokens=500, 
-                verbose=False
+                verbose=False,
+                sampler=sampler
             )
             
             self.schedule_insert_translation(seg_id, translation.strip())
@@ -461,15 +467,23 @@ class ConfigWindow:
 
         # Translation Model Selection
         ttk.Label(self.root, text="Translation AI Model:").pack(pady=10)
-        self.trans_model_combo = ttk.Combobox(self.root, width=40)
+        self.trans_model_combo = ttk.Combobox(self.root, width=50)
         self.trans_model_combo['values'] = [
             "mlx-community/Llama-3.2-1B-Instruct-4bit",
             "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "mlx-community/gemma-2-2b-it-4bit",
+            "mlx-community/gemma-2-9b-it-4bit",
             "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
-            "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+            "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+            "mlx-community/Qwen2.5-3B-Instruct-4bit",
+            "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "mlx-community/Phi-3.5-mini-instruct-4bit",
+            "mlx-community/Mistral-Nemo-Instruct-2407-4bit"
         ]
         self.trans_model_combo.pack(pady=5)
-        self.trans_model_combo.set(self.config.get("translation_model", "mlx-community/Llama-3.2-1B-Instruct-4bit"))
+        self.trans_model_combo.set(self.config.get("translation_model", "mlx-community/gemma-2-2b-it-4bit"))
+        
+        ttk.Label(self.root, text="(Larger models = Better translation but slower)", font=("Arial", 10), foreground="gray").pack()
 
         # Start Button
         btn_text = "Save" if self.restart_callback else "Start Captions"

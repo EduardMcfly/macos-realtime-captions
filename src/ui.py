@@ -6,7 +6,7 @@ import os
 import sounddevice as sd
 from screeninfo import get_monitors
 
-from .app_config import load_config, save_config, stop_event, CONFIG_FILE, pause_event
+from .app_config import load_config, save_config, stop_event, CONFIG_FILE, pause_event, transcription_paused
 from .audio_handler import get_audio_devices
 from .transcriber import run_transcription_loop
 
@@ -154,6 +154,12 @@ class CaptionWindow:
     def perform_translation(self, seg_id):
         # PAUSE TRANSCRIPTION to prevent Metal/MLX concurrency crash
         pause_event.set()
+        
+        # Wait for transcriber to acknowledge pause (max 3s)
+        # This ensures Whisper has finished its current pass and released GPU resources
+        if not transcription_paused.wait(timeout=3.0):
+             print("⚠️ Warning: Transcriber did not pause in time. Proceeding with caution...")
+        
         try:
             # Get text content of the segment
             start, end = self.text_area.tag_ranges(seg_id)

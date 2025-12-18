@@ -26,7 +26,13 @@ if __name__ == "__main__":
             if device_index is not None:
                 # Direct Start
                 print(f"🚀 Auto-starting with saved config: {config}")
-                CaptionWindow(config["model_size"], device_index, config["device_name"], config.get("language", "es"))
+                CaptionWindow(
+                    config["model_size"],
+                    device_index,
+                    config["device_name"], 
+                    config.get("language", "en"), 
+                    config.get("translation_lang", "es")
+                )
             else:
                 # Device not found, show config
                 print("⚠️ Saved device not found. Opening settings...")

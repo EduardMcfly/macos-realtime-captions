@@ -4,37 +4,83 @@ import threading
 import datetime
 import os
 import sounddevice as sd
+from screeninfo import get_monitors
 
 from .app_config import load_config, save_config, stop_event, CONFIG_FILE
 from .audio_handler import get_audio_devices
 from .transcriber import run_transcription_loop
 
 class CaptionWindow:
-    def __init__(self, model_size, device_index, device_name, language):
+    def __init__(self, model_size, device_index, device_name, language, translation_lang="en"):
         print("🔧 Initializing CaptionWindow UI...")
         try:
             self.root = tk.Tk()
         except Exception as e:
             print(f"DEBUG: Failed to create tk.Tk(): {e}")
             raise e
-        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
+        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language} -> {translation_lang}]")
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.88)
         self.root.configure(bg="black")
+        
+        # Translation State
+        self.translation_lang = translation_lang
+        self.translation_model = None
+        self.translation_tokenizer = None
+        self.is_translating = False
         
         # Window Dimensions
         window_width = 800
         window_height = 200
         padding_bottom = 50
 
-        # Calculate Position (Bottom Center of Primary Screen)
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        
-        x_pos = (screen_width - window_width) // 2
-        y_pos = screen_height - window_height - padding_bottom
-        
-        self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+        # Calculate Position (Bottom Center of Monitor with Mouse)
+        try:
+            # 1. Get Mouse Position
+            mouse_x, mouse_y = self.root.winfo_pointerxy()
+            
+            # 2. Find Monitor containing Mouse
+            target_monitor = None
+            monitors = get_monitors()
+            
+            for m in monitors:
+                # Check if mouse is within monitor bounds
+                # screeninfo m: x, y, width, height
+                if (m.x <= mouse_x < m.x + m.width) and (m.y <= mouse_y < m.y + m.height):
+                    target_monitor = m
+                    break
+            
+            # Fallback to primary if not found
+            if not target_monitor and len(monitors) > 0:
+                target_monitor = monitors[0]
+                
+            if target_monitor:
+                # 3. Calculate Center Bottom relative to that monitor
+                # x_pos = monitor_x + (monitor_width - window_width) / 2
+                x_pos = target_monitor.x + (target_monitor.width - window_width) // 2
+                
+                # y_pos = monitor_y + monitor_height - window_height - padding
+                y_pos = target_monitor.y + target_monitor.height - window_height - padding_bottom
+                
+                # Ensure it doesn't go off-screen (basic clamp)
+                if x_pos < target_monitor.x: x_pos = target_monitor.x
+                
+                print(f"🖥️ Detected Monitor: {target_monitor.name} ({target_monitor.width}x{target_monitor.height}) at {target_monitor.x},{target_monitor.y}")
+                print(f"📍 Placing window at: {x_pos},{y_pos}")
+                
+                self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+            else:
+                # Fallback to standard method if screeninfo fails completely
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                x_pos = (screen_width - window_width) // 2
+                y_pos = screen_height - window_height - padding_bottom
+                self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+
+        except Exception as e:
+            print(f"⚠️ Error calculating monitor position: {e}")
+            # Fallback
+            self.root.geometry(f"{window_width}x{window_height}+200+600")
         
         self.last_text_time = datetime.datetime.now()
         self.paragraph_threshold = 2.0 
@@ -48,6 +94,9 @@ class CaptionWindow:
         self.text_area.pack(fill="both", expand=True, padx=15, pady=15)
         self.text_area.insert("1.0", "⏳ Loading Model... Please wait.\n")
         self.text_area.config(state="disabled")
+        
+        # Click to Translate binding
+        self.text_area.bind("<Button-1>", self.on_text_click)
 
         self.model_size = model_size
         self.device_index = device_index
@@ -65,11 +114,93 @@ class CaptionWindow:
         )
         self.processing_thread.start()
         
+        # Start translation model loader in background
+        threading.Thread(target=self.preload_translation_model, daemon=True).start()
+        
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # Start mainloop explicitly
         print("🖥️ Entering Main Loop...")
         self.root.mainloop()
+
+    def preload_translation_model(self):
+        """Preload the lightweight LLM for translation to avoid lag on first click."""
+        try:
+            print("🧠 Pre-loading Translation Model (Qwen2.5-0.5B)...")
+            from mlx_lm import load
+            # Using Qwen2.5-0.5B-Instruct-4bit for extreme speed and low memory
+            self.translation_model, self.translation_tokenizer = load("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+            print("🧠 Translation Model Ready!")
+        except Exception as e:
+            print(f"⚠️ Failed to load translation model: {e}")
+
+    def on_text_click(self, event):
+        """Handle click to translate current text."""
+        if self.is_translating: return
+        
+        # Visual feedback
+        self.root.configure(bg="#1a1a1a") # Slightly lighter bg
+        self.text_area.configure(bg="#1a1a1a")
+        self.root.after(200, lambda: self.root.configure(bg="black"))
+        self.root.after(200, lambda: self.text_area.configure(bg="black"))
+        
+        threading.Thread(target=self.perform_translation, daemon=True).start()
+
+    def perform_translation(self):
+        self.is_translating = True
+        try:
+            # Get current text
+            full_text = self.text_area.get("1.0", tk.END).strip()
+            if not full_text or "Loading" in full_text: 
+                self.is_translating = False
+                return
+
+            print(f"🔄 Translating to {self.translation_lang}...")
+            self.schedule_set_status(f"🔄 Translating to {self.translation_lang}...")
+
+            if not self.translation_model:
+                self.preload_translation_model()
+
+            from mlx_lm import generate
+            
+            # Construct Prompt
+            messages = [
+                {"role": "system", "content": f"You are a professional translator. Translate the following text strictly into {self.translation_lang}. Do not add explanations, just the translation."},
+                {"role": "user", "content": full_text}
+            ]
+            
+            prompt = self.translation_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            
+            # Generate
+            translation = generate(
+                self.translation_model, 
+                self.translation_tokenizer, 
+                prompt=prompt, 
+                max_tokens=500, 
+                verbose=False
+            )
+            
+            # Update UI with translation
+            self.schedule_replace_text(translation.strip())
+
+        except Exception as e:
+            print(f"Translation Error: {e}")
+            self.schedule_set_status(f"❌ Translation Error: {e}")
+            # Revert status after 2s
+            self.root.after(2000, lambda: self.schedule_update_text(full_text, True))
+        
+        self.is_translating = False
+
+    def schedule_replace_text(self, text):
+        self.root.after(0, self.replace_text, text)
+
+    def replace_text(self, text):
+        try:
+            self.text_area.config(state="normal")
+            self.text_area.delete("1.0", tk.END)
+            self.text_area.insert("1.0", text)
+            self.text_area.config(state="disabled")
+        except: pass
 
     def open_settings(self):
         # Stop processing but keep window open
@@ -78,14 +209,15 @@ class CaptionWindow:
         # Open config window with restart callback
         ConfigWindow(restart_callback=self.restart_processing)
 
-    def restart_processing(self, model_size, device_index, device_name, language):
+    def restart_processing(self, model_size, device_index, device_name, language, translation_lang):
         # 1. Update internal state
         self.model_size = model_size
         self.device_index = device_index
         self.language = language if language != "auto" else None
+        self.translation_lang = translation_lang
         
         # 2. Update Window Title
-        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
+        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language} -> {translation_lang}]")
         
         # 3. Reset Stop Event
         stop_event.clear()
@@ -228,6 +360,13 @@ class ConfigWindow:
         self.lang_combo.pack(pady=5)
         self.lang_combo.set(self.config.get("language", "es"))
 
+        # Translation Language Selection
+        ttk.Label(self.root, text="Translation Target Language (Click to Translate):").pack(pady=10)
+        self.trans_lang_combo = ttk.Combobox(self.root, width=40)
+        self.trans_lang_combo['values'] = ["en", "es", "fr", "de", "it", "pt"]
+        self.trans_lang_combo.pack(pady=5)
+        self.trans_lang_combo.set(self.config.get("translation_lang", "en"))
+
         # Start Button
         btn_text = "Restart Captions" if self.restart_callback else "Start Captions"
         ttk.Button(self.root, text=btn_text, command=self.start_app).pack(pady=30)
@@ -238,6 +377,7 @@ class ConfigWindow:
         selected_device_name = self.device_combo.get()
         selected_model = self.model_combo.get()
         selected_lang = self.lang_combo.get()
+        selected_trans_lang = self.trans_lang_combo.get()
         
         if not selected_device_name:
             messagebox.showwarning("Warning", "Please select an audio device.")
@@ -255,7 +395,7 @@ class ConfigWindow:
             return
 
         # Save configuration for next time
-        save_config(selected_device_name, selected_model, selected_lang)
+        save_config(selected_device_name, selected_model, selected_lang, selected_trans_lang)
 
         # Destroy config window
         try:
@@ -264,7 +404,7 @@ class ConfigWindow:
              pass
              
         if self.restart_callback:
-            self.restart_callback(selected_model, device_index, selected_device_name, selected_lang)
+            self.restart_callback(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang)
         else:
-            CaptionWindow(selected_model, device_index, selected_device_name, selected_lang)
+            CaptionWindow(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang)
 

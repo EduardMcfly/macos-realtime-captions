@@ -87,15 +87,14 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
                             if should_commit:
                                 print(f"📝 {text}")
                                 log_to_file(text)
-                                update_callback(text) # Final
+                                update_callback(text, True) # Final
                                 
                                 last_committed_text += " " + text
                                 if len(last_committed_text) > 1000: last_committed_text = last_committed_text[-1000:]
                                 
                                 local_audio_buffer = np.zeros((0, 1), dtype=np.float32)
                             else:
-                                pass # Wait for more audio/context
-                                # update_callback(text, False) # Preview removed to simplify
+                                update_callback(text, False) # Preview
 
                         last_transcribe_time = now
 

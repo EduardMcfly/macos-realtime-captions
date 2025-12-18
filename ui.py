@@ -77,40 +77,54 @@ class CaptionWindow:
         import os
         os._exit(0)
 
-    def schedule_update_text(self, text):
-        self.root.after(0, self.update_text, text)
+    def schedule_update_text(self, text, is_final=True):
+        self.root.after(0, self.update_text, text, is_final)
 
     def schedule_set_status(self, text):
         self.root.after(0, self.set_status, text)
 
-    def update_text(self, text): 
+    def update_text(self, text, is_final=True): 
         try:
             if not self.text_area.winfo_exists(): return
             
             self.text_area.config(state="normal")
+
+            # Remove previous pending text safely
+            try:
+                # We use tag indices provided by tkinter when a tag exists
+                self.text_area.delete("pending.first", "pending.last")
+            except tk.TclError:
+                pass # Tag "pending" not present or empty
             
             if text:
                 prefix = ""
+                # Only add prefix (newlines/spaces) if we are appending permanently or starting a preview
+                # Logic: We want the preview to look like it will be committed.
+                
+                # Check previous character (ignoring the just-deleted pending text)
+                prev_char = self.text_area.get("end-2c", "end-1c")
+                
                 current_time = datetime.datetime.now()
                 time_diff = (current_time - self.last_text_time).total_seconds()
                 
                 if time_diff > self.paragraph_threshold:
                     prefix = "\n\n"
-                else:
-                    # Check if we need a space
-                    # Get the last character directly from the end
-                    prev_char = self.text_area.get("end-2c", "end-1c")
-                    if prev_char and prev_char not in [" ", "\n"] and not text.startswith(" "):
-                        prefix = " "
+                elif prev_char and prev_char not in [" ", "\n"] and not text.startswith(" "):
+                    prefix = " "
 
                 full_text = prefix + text
                 
-                self.text_area.insert(tk.END, full_text)
-                self.last_text_time = current_time
+                if is_final:
+                    self.text_area.insert(tk.END, full_text)
+                    self.last_text_time = current_time
+                else:
+                    self.text_area.insert(tk.END, full_text, "pending")
+                    self.text_area.tag_config("pending", foreground="gray")
                 
             self.text_area.see(tk.END)
             self.text_area.config(state="disabled")
-        except: pass
+        except Exception as e:
+            print(f"Error updating text: {e}")
 
     def set_status(self, text):
         try:

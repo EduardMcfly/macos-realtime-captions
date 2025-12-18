@@ -51,6 +51,8 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
                     # Optimization: Skip if silence
                     rms = np.sqrt(np.mean(local_audio_buffer**2))
                     if rms < SILENCE_THRESHOLD and current_duration < MAX_DURATION:
+                        # Clear pending text if silence is detected to prevent stale previews
+                        update_callback("", False)
                         sd.sleep(50)
                         continue
 

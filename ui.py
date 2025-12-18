@@ -88,6 +88,11 @@ class CaptionWindow:
             if not self.text_area.winfo_exists(): return
             
             self.text_area.config(state="normal")
+            
+            # Check scroll position before modifying text
+            # yview() returns (top, bottom) as fractions between 0 and 1
+            # If bottom is near 1.0, we are at the bottom and should auto-scroll
+            was_at_bottom = self.text_area.yview()[1] > 0.99
 
             # Remove previous pending text safely
             try:
@@ -121,7 +126,9 @@ class CaptionWindow:
                     self.text_area.insert(tk.END, full_text, "pending")
                     self.text_area.tag_config("pending", foreground="gray")
                 
-            self.text_area.see(tk.END)
+            if was_at_bottom:
+                self.text_area.see(tk.END)
+            
             self.text_area.config(state="disabled")
         except Exception as e:
             print(f"Error updating text: {e}")

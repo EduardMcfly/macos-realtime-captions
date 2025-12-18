@@ -11,7 +11,7 @@ from .audio_handler import get_audio_devices
 from .transcriber import run_transcription_loop
 
 class CaptionWindow:
-    def __init__(self, model_size, device_index, device_name, language, translation_lang="en"):
+    def __init__(self, model_size, device_index, device_name, language, translation_lang="en", translation_model="mlx-community/Llama-3.2-1B-Instruct-4bit"):
         print("🔧 Initializing CaptionWindow UI...")
         try:
             self.root = tk.Tk()
@@ -28,6 +28,7 @@ class CaptionWindow:
         
         # Translation State
         self.translation_lang = translation_lang
+        self.translation_model_name = translation_model
         self.translation_model = None
         self.translation_tokenizer = None
         self.is_translating = False
@@ -114,10 +115,10 @@ class CaptionWindow:
     def preload_translation_model(self):
         """Preload the lightweight LLM for translation to avoid lag on first click."""
         try:
-            print("🧠 Pre-loading Translation Model (Llama-3.2-1B)...")
+            print(f"🧠 Pre-loading Translation Model ({self.translation_model_name})...")
             from mlx_lm import load
             # Switching to Llama-3.2-1B-Instruct-4bit for better stability/compatibility
-            self.translation_model, self.translation_tokenizer = load("mlx-community/Llama-3.2-1B-Instruct-4bit")
+            self.translation_model, self.translation_tokenizer = load(self.translation_model_name)
             print("🧠 Translation Model Ready!")
         except Exception as e:
             print(f"⚠️ Failed to load translation model: {e}")
@@ -298,8 +299,8 @@ class CaptionWindow:
             )
              self.processing_thread.start()
 
-    def restart_processing(self, model_size, device_index, device_name, language, translation_lang):
-        print(f"🔄 Restarting with Translation Lang: {translation_lang}")
+    def restart_processing(self, model_size, device_index, device_name, language, translation_lang, translation_model):
+        print(f"🔄 Restarting with Translation Lang: {translation_lang}, Model: {translation_model}")
         
         # Clear config window ref
         self.config_window = None
@@ -309,6 +310,11 @@ class CaptionWindow:
         self.device_index = device_index
         self.language = language if language != "auto" else None
         self.translation_lang = translation_lang
+        self.translation_model_name = translation_model
+        
+        # Reload translation model if it changed
+        self.translation_model = None
+        threading.Thread(target=self.preload_translation_model, daemon=True).start()
         
         # 2. Update Window Title
         self.root.title(f"Live Captions - {device_name} ({model_size}) [{language} -> {translation_lang}]")
@@ -445,9 +451,15 @@ class ConfigWindow:
             self.root.transient(parent)
         else:
             self.root = tk.Tk()
+
+                   
+        my_w = 400
+        my_h = 490
             
         self.root.title("Setup Live Captions")
-        self.root.geometry("400x450")
+        self.root.geometry(
+            f"{my_w}x{my_h}"
+        )
         
         # Center window logic
         if parent:
@@ -457,9 +469,6 @@ class ConfigWindow:
                  parent_y = parent.winfo_rooty()
                  parent_w = parent.winfo_width()
                  parent_h = parent.winfo_height()
-                 
-                 my_w = 400
-                 my_h = 450
                  
                  x = parent_x + (parent_w - my_w) // 2
                  y = parent_y - my_h - 20 # Above the parent window
@@ -517,6 +526,18 @@ class ConfigWindow:
         self.trans_lang_combo.pack(pady=5)
         self.trans_lang_combo.set(self.config.get("translation_lang", "en"))
 
+        # Translation Model Selection
+        ttk.Label(self.root, text="Translation AI Model:").pack(pady=10)
+        self.trans_model_combo = ttk.Combobox(self.root, width=40)
+        self.trans_model_combo['values'] = [
+            "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+            "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        ]
+        self.trans_model_combo.pack(pady=5)
+        self.trans_model_combo.set(self.config.get("translation_model", "mlx-community/Llama-3.2-1B-Instruct-4bit"))
+
         # Start Button
         btn_text = "Save" if self.restart_callback else "Start Captions"
         ttk.Button(self.root, text=btn_text, command=self.start_app).pack(pady=30)
@@ -538,6 +559,7 @@ class ConfigWindow:
         selected_model = self.model_combo.get()
         selected_lang = self.lang_combo.get()
         selected_trans_lang = self.trans_lang_combo.get()
+        selected_trans_model = self.trans_model_combo.get()
         
         if not selected_device_name:
             messagebox.showwarning("Warning", "Please select an audio device.")
@@ -555,13 +577,14 @@ class ConfigWindow:
             return
 
         # Save configuration for next time
-        save_config(selected_device_name, selected_model, selected_lang, selected_trans_lang)
+        save_config(selected_device_name, selected_model, selected_lang, selected_trans_lang, selected_trans_model)
         
         # Explicitly update the instance config so it persists in this session
         self.config["translation_lang"] = selected_trans_lang
         self.config["language"] = selected_lang
         self.config["model_size"] = selected_model
         self.config["device_name"] = selected_device_name
+        self.config["translation_model"] = selected_trans_model
 
         # Destroy config window
         try:
@@ -570,7 +593,7 @@ class ConfigWindow:
              pass
              
         if self.restart_callback:
-            self.restart_callback(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang)
+            self.restart_callback(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang, selected_trans_model)
         else:
-            CaptionWindow(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang)
+            CaptionWindow(selected_model, device_index, selected_device_name, selected_lang, selected_trans_lang, selected_trans_model)
 

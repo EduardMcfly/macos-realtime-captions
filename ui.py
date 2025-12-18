@@ -178,7 +178,7 @@ class ConfigWindow:
         self.model_combo = ttk.Combobox(self.root, width=40)
         self.model_combo['values'] = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_combo.pack(pady=5)
-        self.model_combo.set(self.config.get("model_size", "medium"))
+        self.model_combo.set(self.config.get("model_size", "small"))
         
         ttk.Label(self.root, text="(Fast 'tiny' model always used for previews)", font=("Arial", 10), foreground="gray").pack()
 

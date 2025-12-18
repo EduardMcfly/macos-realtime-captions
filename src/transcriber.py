@@ -3,7 +3,7 @@ import sounddevice as sd
 import mlx_whisper
 import time
 import os
-from .app_config import stop_event, audio_queue, SAMPLE_RATE, pause_event
+from .app_config import stop_event, audio_queue, SAMPLE_RATE, pause_event, transcription_paused
 from .utils import log_to_file
 from .audio_handler import audio_callback
 
@@ -26,7 +26,7 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
     UPDATE_INTERVAL = 0.5
 
     try:
-        status_callback("...")
+        status_callback("Ready to transcribe")
         print(f"✅ Starting MLX Whisper (Fast: tiny, Quality: {model_size})...")
         os.environ["TQDM_DISABLE"] = "1"
         
@@ -45,8 +45,11 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
             while not stop_event.is_set():
                 # Check for pause event (translation in progress)
                 if pause_event.is_set():
+                    transcription_paused.set() # Signal that we are effectively paused
                     sd.sleep(100)
                     continue
+                else:
+                    transcription_paused.clear() # We are active
 
                 # 1. Drain Queue
                 while not audio_queue.empty():

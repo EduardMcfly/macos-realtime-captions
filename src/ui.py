@@ -397,8 +397,18 @@ class CaptionWindow:
         try:
             if not self.text_area.winfo_exists(): return
             self.text_area.config(state="normal")
-            self.text_area.delete("1.0", tk.END)
-            self.text_area.insert("1.0", text + "\n")
+            
+            # Don't clear previous text!
+            # self.text_area.delete("1.0", tk.END)
+            
+            # Append system message
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            msg = f"\n\n[System {timestamp}: {text}]\n\n"
+            
+            self.text_area.insert(tk.END, msg, "system_msg")
+            self.text_area.tag_config("system_msg", foreground="#666666", font=("Helvetica", 12))
+            
+            self.text_area.see(tk.END)
             self.text_area.config(state="disabled")
         except: pass
 

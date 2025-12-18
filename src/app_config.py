@@ -11,6 +11,7 @@ CONFIG_FILE = "config.json"
 # Shared State
 audio_queue = queue.Queue()
 stop_event = threading.Event()
+pause_event = threading.Event() # New event for temporary pauses (e.g., during translation)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):

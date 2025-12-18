@@ -6,7 +6,7 @@ import os
 import sounddevice as sd
 from screeninfo import get_monitors
 
-from .app_config import load_config, save_config, stop_event, CONFIG_FILE
+from .app_config import load_config, save_config, stop_event, CONFIG_FILE, pause_event
 from .audio_handler import get_audio_devices
 from .transcriber import run_transcription_loop
 
@@ -22,6 +22,9 @@ class CaptionWindow:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.88)
         self.root.configure(bg="black")
+        
+        # Track config window instance
+        self.config_window = None
         
         # Translation State
         self.translation_lang = translation_lang
@@ -149,6 +152,8 @@ class CaptionWindow:
             print(f"Click Error: {e}")
 
     def perform_translation(self, seg_id):
+        # PAUSE TRANSCRIPTION to prevent Metal/MLX concurrency crash
+        pause_event.set()
         try:
             # Get text content of the segment
             start, end = self.text_area.tag_ranges(seg_id)
@@ -169,8 +174,15 @@ class CaptionWindow:
             from mlx_lm import generate
             
             # Construct Prompt
+            # Explicitly state the target language name for clarity
+            lang_map = {
+                "en": "English", "es": "Spanish", "fr": "French", 
+                "de": "German", "it": "Italian", "pt": "Portuguese"
+            }
+            target_lang_name = lang_map.get(self.translation_lang, self.translation_lang)
+            
             messages = [
-                {"role": "system", "content": f"You are a professional translator. Translate the following text strictly into {self.translation_lang}. Do not add explanations, just the translation."},
+                {"role": "system", "content": f"You are a professional translator. Translate the following text strictly into {target_lang_name}. Do not add explanations, just the translation."},
                 {"role": "user", "content": segment_text}
             ]
             
@@ -192,6 +204,9 @@ class CaptionWindow:
             print(f"Translation Error: {e}")
             self.schedule_set_status(f"❌ Translation Error: {e}")
             # Remove placeholder if failed? (Enhancement)
+        finally:
+            # RESUME TRANSCRIPTION
+            pause_event.clear()
         
     def schedule_insert_placeholder(self, seg_id):
         self.root.after(0, self.insert_placeholder, seg_id)
@@ -240,13 +255,49 @@ class CaptionWindow:
         except: pass
 
     def open_settings(self):
+        # Prevent multiple windows
+        if self.config_window is not None and self.config_window.root.winfo_exists():
+            self.config_window.root.lift()
+            self.config_window.root.focus_force()
+            return
+            
         # Stop processing but keep window open
         stop_event.set()
         
-        # Open config window with restart callback
-        ConfigWindow(restart_callback=self.restart_processing)
+        # Open config window as Toplevel of this root
+        # We capture the instance
+        self.config_window = ConfigWindow(parent=self.root, restart_callback=self.restart_processing, on_close_callback=self.on_config_close)
+        
+    def on_config_close(self):
+        # Callback when config window closes without restarting
+        self.config_window = None
+        # Resume? Maybe not automatically if user cancelled.
+        # But if they just closed it, we should probably ensure stop_event is cleared if we want to resume?
+        # Current logic stops processing when opening settings. 
+        # If user cancels settings, they probably expect it to resume or stay stopped?
+        # Let's assume they want to resume if they didn't change anything.
+        stop_event.clear()
+        
+        # We need to restart the thread if it died.
+        if not self.processing_thread.is_alive():
+             self.processing_thread = threading.Thread(
+                target=lambda: run_transcription_loop(
+                    self.device_index, 
+                    self.model_size, 
+                    self.language, 
+                    self.schedule_update_text,
+                    self.schedule_set_status
+                ), 
+                daemon=True
+            )
+             self.processing_thread.start()
 
     def restart_processing(self, model_size, device_index, device_name, language, translation_lang):
+        print(f"🔄 Restarting with Translation Lang: {translation_lang}")
+        
+        # Clear config window ref
+        self.config_window = None
+        
         # 1. Update internal state
         self.model_size = model_size
         self.device_index = device_index
@@ -353,11 +404,55 @@ class CaptionWindow:
 
 
 class ConfigWindow:
-    def __init__(self, restart_callback=None):
+    def __init__(self, parent=None, restart_callback=None, on_close_callback=None):
         self.restart_callback = restart_callback
-        self.root = tk.Tk()
+        self.on_close_callback = on_close_callback
+        self.parent = parent
+        
+        if parent:
+            self.root = tk.Toplevel(parent)
+            # Register this window with the parent CaptionWindow if possible
+            # We assume parent is CaptionWindow.root. 
+            # We can find the CaptionWindow instance via some hack or just expect CaptionWindow to track it via the on_close_callback or similar.
+            # Actually, let's just use the fact that 'parent' is the root widget.
+            # We can't easily set self.config_window on the CaptionWindow instance from here without passing the instance.
+            # So we rely on CaptionWindow checking 'winfo_exists' if it kept a reference? 
+            # Wait, CaptionWindow.open_settings didn't capture the instance because __init__ doesn't return it.
+            # We need to fix that interaction.
+            
+            # Better approach:
+            # We set the 'config_window' attribute of the CaptionWindow app if we can find it, 
+            # OR we just let CaptionWindow handle the reference if we return this object. 
+            # But we are inside __init__.
+            
+            # Let's set it as a transient window
+            self.root.transient(parent)
+        else:
+            self.root = tk.Tk()
+            
         self.root.title("Setup Live Captions")
-        self.root.geometry("400x350")
+        self.root.geometry("400x450")
+        
+        # Center window logic
+        if parent:
+             # Center relative to parent
+             try:
+                 parent_x = parent.winfo_rootx()
+                 parent_y = parent.winfo_rooty()
+                 parent_w = parent.winfo_width()
+                 parent_h = parent.winfo_height()
+                 
+                 my_w = 400
+                 my_h = 450
+                 
+                 x = parent_x + (parent_w - my_w) // 2
+                 y = parent_y - my_h - 20 # Above the parent window
+                 
+                 # Keep on screen
+                 if y < 0: y = parent_y + parent_h + 20
+                 
+                 self.root.geometry(f"+{x}+{y}")
+             except: pass
         
         # Load previous config
         self.config = load_config()
@@ -407,10 +502,20 @@ class ConfigWindow:
         self.trans_lang_combo.set(self.config.get("translation_lang", "en"))
 
         # Start Button
-        btn_text = "Restart Captions" if self.restart_callback else "Start Captions"
+        btn_text = "Save" if self.restart_callback else "Start Captions"
         ttk.Button(self.root, text=btn_text, command=self.start_app).pack(pady=30)
         
-        self.root.mainloop()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        if not parent:
+            self.root.mainloop()
+
+    def on_close(self):
+        if self.on_close_callback:
+            self.on_close_callback()
+        try:
+            self.root.destroy()
+        except: pass
 
     def start_app(self):
         selected_device_name = self.device_combo.get()
@@ -435,6 +540,12 @@ class ConfigWindow:
 
         # Save configuration for next time
         save_config(selected_device_name, selected_model, selected_lang, selected_trans_lang)
+        
+        # Explicitly update the instance config so it persists in this session
+        self.config["translation_lang"] = selected_trans_lang
+        self.config["language"] = selected_lang
+        self.config["model_size"] = selected_model
+        self.config["device_name"] = selected_device_name
 
         # Destroy config window
         try:

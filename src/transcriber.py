@@ -3,7 +3,7 @@ import sounddevice as sd
 import mlx_whisper
 import time
 import os
-from .app_config import stop_event, audio_queue, SAMPLE_RATE
+from .app_config import stop_event, audio_queue, SAMPLE_RATE, pause_event
 from .utils import log_to_file
 from .audio_handler import audio_callback
 
@@ -43,6 +43,11 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
             callback=audio_callback
         ):
             while not stop_event.is_set():
+                # Check for pause event (translation in progress)
+                if pause_event.is_set():
+                    sd.sleep(100)
+                    continue
+
                 # 1. Drain Queue
                 while not audio_queue.empty():
                     local_audio_buffer = np.concatenate([local_audio_buffer, audio_queue.get()])

@@ -27,8 +27,13 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
 
     try:
         status_callback("...")
-        print(f"✅ Starting MLX Whisper ({model_size})...")
+        print(f"✅ Starting MLX Whisper (Fast: tiny, Quality: {model_size})...")
         os.environ["TQDM_DISABLE"] = "1"
+        
+        # Pre-load both models to avoid delay on first run
+        # Note: mlx_whisper loads on demand, but we define paths here
+        fast_model_path = "mlx-community/whisper-tiny-mlx"
+        quality_model_path = f"mlx-community/whisper-{model_size}-mlx"
         
         with sd.InputStream(
             device=device_index,
@@ -60,17 +65,28 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
                         # Context Prompting
                         prompt = last_committed_text[-200:] if last_committed_text else " "
                         
-                        # Transcribe Full Buffer
-                        result = mlx_whisper.transcribe(
+                        # Decide which model to use
+                        # If we are committing (final check), use quality model.
+                        # If we are just previewing, use fast model.
+                        
+                        # We need to know if we *would* commit based on duration/silence first?
+                        # Actually, we can just run the fast model first for the preview.
+                        # BUT, if we are near a commit point, we might want to run the quality model directly?
+                        # Simplest Dual Strategy:
+                        # 1. ALWAYS run fast model first to get text for logic/preview.
+                        # 2. If logic says "commit", re-run with quality model on the SAME buffer.
+                        
+                        # Transcribe with FAST model
+                        result_fast = mlx_whisper.transcribe(
                             local_audio_buffer.flatten(),
-                            path_or_hf_repo=f"mlx-community/whisper-{model_size}-mlx",
+                            path_or_hf_repo=fast_model_path,
                             language=language,
                             verbose=False,
                             temperature=0.0,
                             condition_on_previous_text=True,
                             initial_prompt=prompt
                         )
-                        text = result["text"].strip()
+                        text = result_fast["text"].strip()
                         
                         # Anti-Hallucination
                         if text.lower() == prompt.strip().lower():
@@ -87,11 +103,27 @@ def run_transcription_loop(device_index, model_size, language, update_callback, 
                             should_commit = (is_sentence_end and is_silence_end) or (current_duration > MAX_DURATION)
                             
                             if should_commit:
-                                print(f"📝 {text}")
-                                log_to_file(text)
-                                update_callback(text, True) # Final
+                                # RE-TRANSCRIBE with QUALITY model
+                                print("✨ Refining with quality model...")
+                                result_quality = mlx_whisper.transcribe(
+                                    local_audio_buffer.flatten(),
+                                    path_or_hf_repo=quality_model_path,
+                                    language=language,
+                                    verbose=False,
+                                    temperature=0.0,
+                                    condition_on_previous_text=True,
+                                    initial_prompt=prompt
+                                )
+                                text_quality = result_quality["text"].strip()
                                 
-                                last_committed_text += " " + text
+                                # Use quality text if valid, else fallback to fast text
+                                final_text = text_quality if text_quality else text
+                                
+                                print(f"📝 {final_text}")
+                                log_to_file(final_text)
+                                update_callback(final_text, True) # Final
+                                
+                                last_committed_text += " " + final_text
                                 if len(last_committed_text) > 1000: last_committed_text = last_committed_text[-1000:]
                                 
                                 local_audio_buffer = np.zeros((0, 1), dtype=np.float32)

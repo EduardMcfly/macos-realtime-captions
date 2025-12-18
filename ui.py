@@ -178,9 +178,9 @@ class ConfigWindow:
         self.model_combo = ttk.Combobox(self.root, width=40)
         self.model_combo['values'] = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_combo.pack(pady=5)
-        self.model_combo.set(self.config.get("model_size", "small"))
+        self.model_combo.set(self.config.get("model_size", "medium"))
         
-        ttk.Label(self.root, text="(tiny = fastest/less accurate, medium = slower/more accurate)", font=("Arial", 10), foreground="gray").pack()
+        ttk.Label(self.root, text="(Fast 'tiny' model always used for previews)", font=("Arial", 10), foreground="gray").pack()
 
         # Language Selection
         ttk.Label(self.root, text="Select Language:").pack(pady=10)

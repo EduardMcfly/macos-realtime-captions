@@ -59,13 +59,38 @@ class CaptionWindow:
         self.root.mainloop()
 
     def open_settings(self):
-        if messagebox.askyesno("Settings", "Change settings? This will restart the captions."):
-            stop_event.set()
-            try:
-                self.root.destroy()
-            except:
-                pass
-            ConfigWindow()
+        # Stop processing but keep window open
+        stop_event.set()
+        
+        # Open config window with restart callback
+        ConfigWindow(restart_callback=self.restart_processing)
+
+    def restart_processing(self, model_size, device_index, device_name, language):
+        # 1. Update internal state
+        self.model_size = model_size
+        self.device_index = device_index
+        self.language = language if language != "auto" else None
+        
+        # 2. Update Window Title
+        self.root.title(f"Live Captions - {device_name} ({model_size}) [{language}]")
+        
+        # 3. Reset Stop Event
+        stop_event.clear()
+        
+        # 4. Restart Thread
+        self.processing_thread = threading.Thread(
+            target=lambda: run_transcription_loop(
+                self.device_index, 
+                self.model_size, 
+                self.language, 
+                self.schedule_update_text,
+                self.schedule_set_status
+            ), 
+            daemon=True
+        )
+        self.processing_thread.start()
+        
+        self.set_status(f"🔄 Restarted with {model_size}...")
 
     def on_close(self):
         stop_event.set()
@@ -144,7 +169,8 @@ class CaptionWindow:
 
 
 class ConfigWindow:
-    def __init__(self):
+    def __init__(self, restart_callback=None):
+        self.restart_callback = restart_callback
         self.root = tk.Tk()
         self.root.title("Setup Live Captions")
         self.root.geometry("400x350")
@@ -178,7 +204,7 @@ class ConfigWindow:
         self.model_combo = ttk.Combobox(self.root, width=40)
         self.model_combo['values'] = ["tiny", "base", "small", "medium", "large-v3"]
         self.model_combo.pack(pady=5)
-        self.model_combo.set(self.config.get("model_size", "small"))
+        self.model_combo.set(self.config.get("model_size", "medium"))
         
         ttk.Label(self.root, text="(Fast 'tiny' model always used for previews)", font=("Arial", 10), foreground="gray").pack()
 
@@ -190,7 +216,8 @@ class ConfigWindow:
         self.lang_combo.set(self.config.get("language", "es"))
 
         # Start Button
-        ttk.Button(self.root, text="Start Captions", command=self.start_app).pack(pady=30)
+        btn_text = "Restart Captions" if self.restart_callback else "Start Captions"
+        ttk.Button(self.root, text=btn_text, command=self.start_app).pack(pady=30)
         
         self.root.mainloop()
 
@@ -223,6 +250,8 @@ class ConfigWindow:
         except:
              pass
              
-        # Launch main window
-        CaptionWindow(selected_model, device_index, selected_device_name, selected_lang)
+        if self.restart_callback:
+            self.restart_callback(selected_model, device_index, selected_device_name, selected_lang)
+        else:
+            CaptionWindow(selected_model, device_index, selected_device_name, selected_lang)
 

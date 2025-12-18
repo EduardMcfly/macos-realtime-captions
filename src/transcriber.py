@@ -3,9 +3,9 @@ import sounddevice as sd
 import mlx_whisper
 import time
 import os
-from app_config import stop_event, audio_queue, SAMPLE_RATE
-from utils import log_to_file
-from audio_handler import audio_callback
+from .app_config import stop_event, audio_queue, SAMPLE_RATE
+from .utils import log_to_file
+from .audio_handler import audio_callback
 
 def run_transcription_loop(device_index, model_size, language, update_callback, status_callback):
     """

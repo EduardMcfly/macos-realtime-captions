@@ -1,6 +1,6 @@
 import sounddevice as sd
 from tkinter import messagebox
-from app_config import audio_queue, stop_event
+from .app_config import audio_queue, stop_event
 
 def audio_callback(indata, frames, time, status):
     if not stop_event.is_set():

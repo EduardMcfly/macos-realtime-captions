@@ -5,9 +5,9 @@ import datetime
 import os
 import sounddevice as sd
 
-from app_config import load_config, save_config, stop_event, CONFIG_FILE
-from audio_handler import get_audio_devices
-from transcriber import run_transcription_loop
+from .app_config import load_config, save_config, stop_event, CONFIG_FILE
+from .audio_handler import get_audio_devices
+from .transcriber import run_transcription_loop
 
 class CaptionWindow:
     def __init__(self, model_size, device_index, device_name, language):

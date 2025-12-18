@@ -1,7 +1,12 @@
 import os
-from app_config import load_config
-from ui import CaptionWindow, ConfigWindow
-from audio_handler import get_audio_devices
+import sys
+
+# Add src to path so we can import modules
+sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
+
+from src.app_config import load_config
+from src.ui import CaptionWindow, ConfigWindow
+from src.audio_handler import get_audio_devices
 
 if __name__ == "__main__":
     # Check if config exists to auto-start

@@ -29,59 +29,44 @@ class CaptionWindow:
         self.translation_tokenizer = None
         self.is_translating = False
         
-        # Window Dimensions
+        # Window Dimensions (initial hint)
         window_width = 800
         window_height = 200
         padding_bottom = 50
 
-        # Calculate Position (Bottom Center of Monitor with Mouse)
-        try:
-            # 1. Get Mouse Position
-            mouse_x, mouse_y = self.root.winfo_pointerxy()
-            
-            # 2. Find Monitor containing Mouse
-            target_monitor = None
-            monitors = get_monitors()
-            
-            for m in monitors:
-                # Check if mouse is within monitor bounds
-                # screeninfo m: x, y, width, height
-                if (m.x <= mouse_x < m.x + m.width) and (m.y <= mouse_y < m.y + m.height):
-                    target_monitor = m
-                    break
-            
-            # Fallback to primary if not found
-            if not target_monitor and len(monitors) > 0:
-                target_monitor = monitors[0]
-                
-            if target_monitor:
-                # 3. Calculate Center Bottom relative to that monitor
-                # x_pos = monitor_x + (monitor_width - window_width) / 2
-                x_pos = target_monitor.x + (target_monitor.width - window_width) // 2
-                
-                # y_pos = monitor_y + monitor_height - window_height - padding
-                y_pos = target_monitor.y + target_monitor.height - window_height - padding_bottom
-                
-                # Ensure it doesn't go off-screen (basic clamp)
-                if x_pos < target_monitor.x: x_pos = target_monitor.x
-                
-                print(f"🖥️ Detected Monitor: {target_monitor.name} ({target_monitor.width}x{target_monitor.height}) at {target_monitor.x},{target_monitor.y}")
-                print(f"📍 Placing window at: {x_pos},{y_pos}")
-                
-                self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
-            else:
-                # Fallback to standard method if screeninfo fails completely
-                screen_width = self.root.winfo_screenwidth()
-                screen_height = self.root.winfo_screenheight()
-                x_pos = (screen_width - window_width) // 2
-                y_pos = screen_height - window_height - padding_bottom
-                self.root.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")
+        # Apply initial size FIRST
+        self.root.geometry(f"{window_width}x{window_height}")
+        # Ensure Tk layout is ready
+        self.root.update_idletasks()
 
-        except Exception as e:
-            print(f"⚠️ Error calculating monitor position: {e}")
-            # Fallback
-            self.root.geometry(f"{window_width}x{window_height}+200+600")
-        
+        real_width = self.root.winfo_width()
+        real_height = self.root.winfo_height()
+
+        # Horizontal position → monitor with mouse
+        mouse_x, mouse_y = self.root.winfo_pointerxy()
+        monitors = get_monitors()
+        target_monitor = None
+
+        for m in monitors:
+            if m.x <= mouse_x < m.x + m.width:
+                target_monitor = m
+                break
+
+        if target_monitor is None and monitors:
+            target_monitor = monitors[0]
+
+        # X centered in monitor
+        if target_monitor:
+            x_pos = target_monitor.x + (target_monitor.width - real_width) // 2
+        else:
+            x_pos = (self.root.winfo_screenwidth() - real_width) // 2
+
+        # Y using usable screen (dock-safe)
+        y_pos = self.root.winfo_screenheight() - real_height - 20 - padding_bottom
+
+        self.root.geometry(f"+{x_pos}+{y_pos}")
+
+
         self.last_text_time = datetime.datetime.now()
         self.paragraph_threshold = 2.0 
         self.language = language if language != "auto" else None
@@ -126,37 +111,57 @@ class CaptionWindow:
     def preload_translation_model(self):
         """Preload the lightweight LLM for translation to avoid lag on first click."""
         try:
-            print("🧠 Pre-loading Translation Model (Qwen2.5-0.5B)...")
+            print("🧠 Pre-loading Translation Model (Llama-3.2-1B)...")
             from mlx_lm import load
-            # Using Qwen2.5-0.5B-Instruct-4bit for extreme speed and low memory
-            self.translation_model, self.translation_tokenizer = load("mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+            # Switching to Llama-3.2-1B-Instruct-4bit for better stability/compatibility
+            self.translation_model, self.translation_tokenizer = load("mlx-community/Llama-3.2-1B-Instruct-4bit")
             print("🧠 Translation Model Ready!")
         except Exception as e:
             print(f"⚠️ Failed to load translation model: {e}")
 
     def on_text_click(self, event):
         """Handle click to translate current text."""
-        if self.is_translating: return
-        
-        # Visual feedback
-        self.root.configure(bg="#1a1a1a") # Slightly lighter bg
-        self.text_area.configure(bg="#1a1a1a")
-        self.root.after(200, lambda: self.root.configure(bg="black"))
-        self.root.after(200, lambda: self.text_area.configure(bg="black"))
-        
-        threading.Thread(target=self.perform_translation, daemon=True).start()
-
-    def perform_translation(self):
-        self.is_translating = True
+        # Find which tag/segment was clicked
         try:
-            # Get current text
-            full_text = self.text_area.get("1.0", tk.END).strip()
-            if not full_text or "Loading" in full_text: 
-                self.is_translating = False
+            index = self.text_area.index(f"@{event.x},{event.y}")
+            tags = self.text_area.tag_names(index)
+            
+            # Look for our segment tag
+            target_seg_id = None
+            for tag in tags:
+                if tag.startswith("seg_"):
+                    target_seg_id = tag
+                    break
+            
+            if not target_seg_id:
+                return # Clicked on whitespace or non-segment
+            
+            # Check if already translating this specific segment
+            # We can use a set or check if a translation tag exists
+            trans_tag = f"trans_{target_seg_id}"
+            if self.text_area.tag_ranges(trans_tag):
+                print("Already translated/translating this segment.")
                 return
 
-            print(f"🔄 Translating to {self.translation_lang}...")
-            self.schedule_set_status(f"🔄 Translating to {self.translation_lang}...")
+            threading.Thread(target=self.perform_translation, args=(target_seg_id,), daemon=True).start()
+            
+        except Exception as e:
+            print(f"Click Error: {e}")
+
+    def perform_translation(self, seg_id):
+        try:
+            # Get text content of the segment
+            start, end = self.text_area.tag_ranges(seg_id)
+            segment_text = self.text_area.get(start, end).strip()
+            
+            if not segment_text: return
+
+            # Insert a temporary "Translating..." placeholder immediately after the segment
+            # We schedule this on the UI thread
+            self.schedule_insert_placeholder(seg_id)
+
+            print(f"🔄 Translating segment '{segment_text[:20]}...' to {self.translation_lang}...")
+            # self.schedule_set_status(f"🔄 Translating to {self.translation_lang}...")
 
             if not self.translation_model:
                 self.preload_translation_model()
@@ -166,7 +171,7 @@ class CaptionWindow:
             # Construct Prompt
             messages = [
                 {"role": "system", "content": f"You are a professional translator. Translate the following text strictly into {self.translation_lang}. Do not add explanations, just the translation."},
-                {"role": "user", "content": full_text}
+                {"role": "user", "content": segment_text}
             ]
             
             prompt = self.translation_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -180,25 +185,57 @@ class CaptionWindow:
                 verbose=False
             )
             
-            # Update UI with translation
-            self.schedule_replace_text(translation.strip())
+            # Update UI with translation inline
+            self.schedule_insert_translation(seg_id, translation.strip())
 
         except Exception as e:
             print(f"Translation Error: {e}")
             self.schedule_set_status(f"❌ Translation Error: {e}")
-            # Revert status after 2s
-            self.root.after(2000, lambda: self.schedule_update_text(full_text, True))
+            # Remove placeholder if failed? (Enhancement)
         
-        self.is_translating = False
+    def schedule_insert_placeholder(self, seg_id):
+        self.root.after(0, self.insert_placeholder, seg_id)
 
-    def schedule_replace_text(self, text):
-        self.root.after(0, self.replace_text, text)
-
-    def replace_text(self, text):
+    def insert_placeholder(self, seg_id):
         try:
             self.text_area.config(state="normal")
-            self.text_area.delete("1.0", tk.END)
-            self.text_area.insert("1.0", text)
+            
+            # Find end of segment
+            # tag_ranges returns flat list (start, end, start, end...) usually just 2 for us
+            ranges = self.text_area.tag_ranges(seg_id)
+            if not ranges: return
+            end_index = ranges[-1]
+            
+            trans_id = f"trans_{seg_id}"
+            
+            # Insert loading text
+            self.text_area.insert(end_index, "\n(Translating...)", trans_id)
+            self.text_area.tag_config(trans_id, font=("Helvetica", 14, "italic"), foreground="#888888")
+            
+            self.text_area.config(state="disabled")
+        except: pass
+
+    def schedule_insert_translation(self, seg_id, text):
+        self.root.after(0, self.insert_translation, seg_id, text)
+
+    def insert_translation(self, seg_id, text):
+        try:
+            self.text_area.config(state="normal")
+            
+            trans_id = f"trans_{seg_id}"
+            
+            # Find the placeholder range
+            ranges = self.text_area.tag_ranges(trans_id)
+            if ranges:
+                # Delete placeholder
+                self.text_area.delete(ranges[0], ranges[1])
+                # Insert actual translation at the same spot (ranges[0])
+                # We add a small indentation or visual separation
+                final_text = f"\n↳ {text}" 
+                self.text_area.insert(ranges[0], final_text, trans_id)
+                # Update tag style
+                self.text_area.tag_config(trans_id, font=("Helvetica", 18, "italic"), foreground="#aaaaaa")
+            
             self.text_area.config(state="disabled")
         except: pass
 
@@ -290,7 +327,9 @@ class CaptionWindow:
                 full_text = prefix + text
                 
                 if is_final:
-                    self.text_area.insert(tk.END, full_text)
+                    # Create a unique tag for this segment to allow individual translation
+                    seg_id = f"seg_{int(current_time.timestamp() * 1000)}"
+                    self.text_area.insert(tk.END, full_text, seg_id)
                     self.last_text_time = current_time
                 else:
                     self.text_area.insert(tk.END, full_text, "pending")

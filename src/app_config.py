@@ -21,11 +21,12 @@ def load_config():
             pass
     return {}
 
-def save_config(device_name, model_size, language):
+def save_config(device_name, model_size, language, translation_lang="en"):
     config = {
         "device_name": device_name,
         "model_size": model_size,
-        "language": language
+        "language": language,
+        "translation_lang": translation_lang
     }
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f)

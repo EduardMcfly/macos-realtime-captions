@@ -3,3 +3,4 @@ sounddevice>=0.4.6
 numpy>=1.24
 mlx-whisper>=0.0.1
 screeninfo>=0.8.1
+mlx-lm>=0.0.1

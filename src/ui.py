@@ -67,19 +67,24 @@ class CaptionWindow:
         self._setup_window_geometry()
 
         self.last_text_time = datetime.datetime.now()
-        self.paragraph_threshold = 2.0 
+        self.paragraph_threshold = 2.0
+        self.segment_separator = " • " 
 
         # UI Components
         config_btn = tk.Button(self.root, text="⚙️", font=("Arial", 14), bg="black", fg="white", bd=0, command=self.open_settings)
         config_btn.place(relx=1.0, x=-10, y=10, anchor="ne")
 
-        self.text_area = tk.Text(self.root, font=("Helvetica", 20), fg="white", bg="black", wrap="word", height=5, bd=0, highlightthickness=0)
+        self.text_area = tk.Text(self.root, font=("Helvetica", 20), fg="white", bg="black", wrap="word", height=5, bd=0, highlightthickness=0, cursor="arrow")
         self.text_area.pack(fill="both", expand=True, padx=15, pady=15)
         self.text_area.insert("1.0", "⏳ Loading Model... Please wait.\n")
         self.text_area.config(state="disabled")
         
         # Click to Translate binding
         self.text_area.bind("<Button-1>", self.on_text_click)
+        self.text_area.bind("<Motion>", self.on_mouse_motion)
+        
+        # Track currently hovered segment
+        self.hovered_segment = None
         
         # Start translation model loader in background
         threading.Thread(target=self.preload_translation_model, daemon=True).start()
@@ -144,6 +149,35 @@ class CaptionWindow:
         except Exception as e:
             print(f"⚠️ Failed to load translation model: {e}")
 
+    def on_mouse_motion(self, event):
+        """Handle mouse motion to show hover effect on segments."""
+        try:
+            index = self.text_area.index(f"@{event.x},{event.y}")
+            tags = self.text_area.tag_names(index)
+            
+            current_seg = None
+            for tag in tags:
+                if tag.startswith("seg_"):
+                    current_seg = tag
+                    break
+            
+            # If we moved to a different segment
+            if current_seg != self.hovered_segment:
+                # Remove hover from previous segment
+                if self.hovered_segment:
+                    self.text_area.tag_config(self.hovered_segment, background="black")
+                
+                # Add hover to new segment
+                if current_seg:
+                    self.text_area.tag_config(current_seg, background="#1a1a1a")
+                    self.text_area.config(cursor="hand2")
+                else:
+                    self.text_area.config(cursor="arrow")
+                
+                self.hovered_segment = current_seg
+        except:
+            pass
+    
     def on_text_click(self, event):
         """Handle click to translate current text."""
         try:
@@ -172,34 +206,14 @@ class CaptionWindow:
                  return
 
             # --- Extract Text (Main Thread) ---
-            # Search backwards for paragraph start (double newline)
-            # We use the segment's END as reference to ensure we catch the start of THIS paragraph
-            # (If we use start, and start is \n\n, backward search might skip it and find previous paragraph)
-            seg_end_idx = self.text_area.index(f"{target_seg_id}.last")
+            # Extract the text from the specific clicked segment only
+            ranges = self.text_area.tag_ranges(target_seg_id)
+            if not ranges:
+                print("No text ranges found for segment")
+                return
             
-            para_start_idx = self.text_area.search("\n\n", seg_end_idx, backwards=True, stopindex="1.0")
-            if not para_start_idx:
-                para_start_idx = "1.0"
-            else:
-                para_start_idx = f"{para_start_idx} + 2 chars"
-            
-            # Search forwards for paragraph end
-            # We search from segment END to find the NEXT separator
-            para_end_idx = self.text_area.search("\n\n", seg_end_idx, stopindex="end")
-            if not para_end_idx:
-                para_end_idx = "end-1c"
-            
-            # Get full paragraph text
-            full_text = self.text_area.get(para_start_idx, para_end_idx).strip()
-            
-            # Filter
-            clean_lines = [
-                line for line in full_text.split('\n') 
-                if not line.strip().startswith("↳") 
-                and not line.strip().startswith("(Translating...") 
-                and "[System" not in line
-            ]
-            segment_text = " ".join(clean_lines).strip()
+            # Get the text directly from the clicked segment's tag
+            segment_text = self.text_area.get(ranges[0], ranges[1]).strip()
             
             if not segment_text: 
                 print("Empty segment text, skipping.")
@@ -207,6 +221,9 @@ class CaptionWindow:
 
             # --- Lock & Feedback (Main Thread) ---
             self.active_translations.add(target_seg_id)
+            
+            # Visual feedback: highlight the segment being translated
+            self.text_area.tag_config(target_seg_id, background="#2a2a00")
             
             # If re-translating, we might want to clear old translation visually first or just overwrite it
             # The insert_placeholder will handle insertion, but if "trans_id" exists it might just append?
@@ -292,6 +309,8 @@ class CaptionWindow:
     def cleanup_lock(self, seg_id):
         if seg_id in self.active_translations:
             self.active_translations.remove(seg_id)
+        # Restore normal background color
+        self.text_area.tag_config(seg_id, background="black")
         
     def schedule_insert_placeholder(self, seg_id):
         self.root.after(0, self.insert_placeholder, seg_id)
@@ -304,8 +323,8 @@ class CaptionWindow:
             end_index = ranges[-1]
             
             trans_id = f"trans_{seg_id}"
-            self.text_area.insert(end_index, "\n(Translating...)", trans_id)
-            self.text_area.tag_config(trans_id, font=("Helvetica", 14, "italic"), foreground="#888888")
+            self.text_area.insert(end_index, "\n   ⏳ Translating...", trans_id)
+            self.text_area.tag_config(trans_id, font=("Helvetica", 14, "italic"), foreground="#666666")
             self.text_area.config(state="disabled")
         except: pass
 
@@ -319,9 +338,9 @@ class CaptionWindow:
             ranges = self.text_area.tag_ranges(trans_id)
             if ranges:
                 self.text_area.delete(ranges[0], ranges[1])
-                final_text = f"\n↳ {text}" 
+                final_text = f"\n   ↳ {text}" 
                 self.text_area.insert(ranges[0], final_text, trans_id)
-                self.text_area.tag_config(trans_id, font=("Helvetica", 18, "italic"), foreground="#aaaaaa")
+                self.text_area.tag_config(trans_id, font=("Helvetica", 17, "italic"), foreground="#90EE90", background="#0a0a0a")
             self.text_area.config(state="disabled")
         except: pass
 
@@ -420,13 +439,21 @@ class CaptionWindow:
                 if time_diff > self.paragraph_threshold:
                     prefix = "\n\n"
                 elif prev_char and prev_char not in [" ", "\n"] and not text.startswith(" "):
-                    prefix = " "
+                    # Add separator between segments on the same line
+                    if is_final:
+                        prefix = self.segment_separator
+                    else:
+                        prefix = " "
 
                 full_text = prefix + text
                 
                 if is_final:
                     seg_id = f"seg_{int(current_time.timestamp() * 1000)}"
                     self.text_area.insert(tk.END, full_text, seg_id)
+                    # Configure segment appearance
+                    self.text_area.tag_config(seg_id, foreground="white", background="black")
+                    self.text_area.tag_bind(seg_id, "<Enter>", lambda e, sid=seg_id: self.text_area.tag_config(sid, background="#1a1a1a"))
+                    self.text_area.tag_bind(seg_id, "<Leave>", lambda e, sid=seg_id: self.text_area.tag_config(sid, background="black") if sid not in self.active_translations else None)
                     self.last_text_time = current_time
                 else:
                     self.text_area.insert(tk.END, full_text, "pending")

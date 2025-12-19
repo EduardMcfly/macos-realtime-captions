@@ -30,10 +30,10 @@ class Transcriber:
         self.transcription_paused = threading.Event()
         
         # Configuration
-        self.silence_threshold = 0.01 
-        self.min_duration = 1.0
+        self.silence_threshold = 0.01
+        self.min_duration = 2.0
         self.max_duration = 15.0 
-        self.update_interval = 0.5
+        self.update_interval = 1
         
         # State
         self.local_audio_buffer = np.zeros((0, 1), dtype=np.float32)

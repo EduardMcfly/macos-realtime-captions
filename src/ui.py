@@ -43,6 +43,9 @@ class CaptionWindow:
         self.translation_tokenizer = None
         self.is_translating = False
         
+        # Track active translations to prevent double-clicks
+        self.active_translations = set()
+        
         # Core Components
         self.audio_queue = queue.Queue()
         self.audio_recorder = AudioRecorder(device_index, 16000, self.audio_queue)
@@ -78,18 +81,22 @@ class CaptionWindow:
         # Click to Translate binding
         self.text_area.bind("<Button-1>", self.on_text_click)
         
-        # Start Processing
-        self.transcriber.start()
-        self.audio_recorder.start()
-        
         # Start translation model loader in background
         threading.Thread(target=self.preload_translation_model, daemon=True).start()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Schedule processing start after mainloop is running
+        self.root.after(500, self.start_processing)
         
         # Start mainloop explicitly
         print("🖥️ Entering Main Loop...")
         self.root.mainloop()
+
+    def start_processing(self):
+        """Starts background threads once UI is ready."""
+        self.transcriber.start()
+        self.audio_recorder.start()
 
     def _setup_window_geometry(self):
         window_width = 800
@@ -152,43 +159,94 @@ class CaptionWindow:
             if not target_seg_id:
                 return 
             
+            # Allow re-translation even if it exists
+            # We just need to remove the old one first if it exists to avoid duplication visual mess
             trans_tag = f"trans_{target_seg_id}"
             if self.text_area.tag_ranges(trans_tag):
-                print("Already translated/translating this segment.")
+                print("Re-translating segment...")
+                # We don't return here anymore, we proceed to re-translate
+            
+            # Check if this segment is already being processed to avoid double-queueing
+            if target_seg_id in self.active_translations:
+                 print("Translation already in progress for this segment.")
+                 return
+
+            # --- Extract Text (Main Thread) ---
+            # Search backwards for paragraph start (double newline)
+            # We use the segment's END as reference to ensure we catch the start of THIS paragraph
+            # (If we use start, and start is \n\n, backward search might skip it and find previous paragraph)
+            seg_end_idx = self.text_area.index(f"{target_seg_id}.last")
+            
+            para_start_idx = self.text_area.search("\n\n", seg_end_idx, backwards=True, stopindex="1.0")
+            if not para_start_idx:
+                para_start_idx = "1.0"
+            else:
+                para_start_idx = f"{para_start_idx} + 2 chars"
+            
+            # Search forwards for paragraph end
+            # We search from segment END to find the NEXT separator
+            para_end_idx = self.text_area.search("\n\n", seg_end_idx, stopindex="end")
+            if not para_end_idx:
+                para_end_idx = "end-1c"
+            
+            # Get full paragraph text
+            full_text = self.text_area.get(para_start_idx, para_end_idx).strip()
+            
+            # Filter
+            clean_lines = [
+                line for line in full_text.split('\n') 
+                if not line.strip().startswith("↳") 
+                and not line.strip().startswith("(Translating...") 
+                and "[System" not in line
+            ]
+            segment_text = " ".join(clean_lines).strip()
+            
+            if not segment_text: 
+                print("Empty segment text, skipping.")
                 return
 
-            threading.Thread(target=self.perform_translation, args=(target_seg_id,), daemon=True).start()
+            # --- Lock & Feedback (Main Thread) ---
+            self.active_translations.add(target_seg_id)
+            
+            # If re-translating, we might want to clear old translation visually first or just overwrite it
+            # The insert_placeholder will handle insertion, but if "trans_id" exists it might just append?
+            # insert_placeholder uses insert, but doesn't delete old unless we tell it to.
+            # Actually insert_placeholder just inserts. 
+            # If we already have a translation, we should probably delete it now to show "Translating..." again.
+            if self.text_area.tag_ranges(trans_tag):
+                ranges = self.text_area.tag_ranges(trans_tag)
+                self.text_area.config(state="normal")
+                self.text_area.delete(ranges[0], ranges[1])
+                self.text_area.config(state="disabled")
+
+            self.insert_placeholder(target_seg_id) # Immediate visual feedback
+
+            # --- Start Background Task ---
+            print(f"🚀 Starting translation for: {segment_text[:30]}...")
+            threading.Thread(
+                target=self.perform_translation, 
+                args=(target_seg_id, segment_text), 
+                daemon=True
+            ).start()
             
         except Exception as e:
             print(f"Click Error: {e}")
+            if target_seg_id and target_seg_id in self.active_translations:
+                 self.active_translations.remove(target_seg_id)
 
-    def perform_translation(self, seg_id):
-        # PAUSE TRANSCRIPTION to prevent Metal/MLX concurrency crash
+    def perform_translation(self, seg_id, text):
+        # PAUSE TRANSCRIPTION
         self.transcriber.pause()
-        
-        # Wait for transcriber to acknowledge pause (max 3s)
-        # We need a way to check. Transcriber has is_paused() but it's checking the event.
-        # We need to wait for the transcriber loop to actually hit the pause block.
-        # The Transcriber sets transcription_paused event when it pauses.
         
         start_wait = time.time()
         while not self.transcriber.is_paused() and (time.time() - start_wait < 3.0):
             time.sleep(0.1)
             
-        if not self.transcriber.is_paused():
-             print("⚠️ Warning: Transcriber did not pause in time. Proceeding with caution...")
-        
         try:
-            start, end = self.text_area.tag_ranges(seg_id)
-            segment_text = self.text_area.get(start, end).strip()
+            print(f"🔄 Translating '{text[:20]}...' to {self.translation_lang}...")
             
-            if not segment_text: return
-
-            self.schedule_insert_placeholder(seg_id)
-
-            print(f"🔄 Translating segment '{segment_text[:20]}...' to {self.translation_lang}...")
-
             if not self.translation_model:
+                self.schedule_set_status("⏳ Loading Translation Model...")
                 self.preload_translation_model()
 
             from mlx_lm import generate
@@ -200,15 +258,13 @@ class CaptionWindow:
             }
             target_lang_name = lang_map.get(self.translation_lang, self.translation_lang)
             
-            # More robust prompt to ensure full translation
             messages = [
                 {"role": "system", "content": f"You are a professional interpreter. Translate the exact text provided below into {target_lang_name}. Translate every single sentence found in the input. Do not summarize, do not omit any details. Do not add explanations, just output the translation."},
-                {"role": "user", "content": segment_text}
+                {"role": "user", "content": f"'''{text}'''"}
             ]
             
             prompt = self.translation_tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             
-            # Use a slight temperature to improve fluency, but keep it low for accuracy
             sampler = make_sampler(temp=0.1)
 
             translation = generate(
@@ -221,13 +277,21 @@ class CaptionWindow:
             )
             
             self.schedule_insert_translation(seg_id, translation.strip())
-
+            
         except Exception as e:
             print(f"Translation Error: {e}")
             self.schedule_set_status(f"❌ Translation Error: {e}")
+            # Optionally remove placeholder or show error in text?
         finally:
-            # RESUME TRANSCRIPTION
+            self.schedule_cleanup_lock(seg_id)
             self.transcriber.resume()
+
+    def schedule_cleanup_lock(self, seg_id):
+        self.root.after(0, self.cleanup_lock, seg_id)
+
+    def cleanup_lock(self, seg_id):
+        if seg_id in self.active_translations:
+            self.active_translations.remove(seg_id)
         
     def schedule_insert_placeholder(self, seg_id):
         self.root.after(0, self.insert_placeholder, seg_id)

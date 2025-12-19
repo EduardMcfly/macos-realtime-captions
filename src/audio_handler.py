@@ -48,5 +48,5 @@ class AudioRecorder:
         try:
             return sd.query_devices()
         except Exception as e:
-            print(f"Error listing audio devices: {e}")
-            return []
+                print(f"Error listing audio devices: {e}")
+        return []
